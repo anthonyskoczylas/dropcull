@@ -448,6 +448,8 @@ async function startScan(root) {
           item.stars = old.stars || 0; item.inRejects = !!old.inRejects;
           item.hidden = !!old.hidden;
           item.look = LOOKS[old.look] ? old.look : null;
+          item.level = old.level === false ? false : null;
+          if (old.horizon) item.horizon = old.horizon;
         }
         lib.done++;
         if (lib.done % 5 === 0 || lib.done === lib.total) broadcast('progress', progressPayload());
@@ -663,8 +665,71 @@ function buildLUTs(p, adaptA, adaptB) {
   return luts;
 }
 
-// One engine, six looks. Returns a sharp pipeline ready to encode.
-async function buildLook(src, lookName) {
+// ---- horizon auto-leveling ----------------------------------------------
+// Detects a tilted horizon (Sobel-Y edges → Hough restricted to near-
+// horizontal lines) and only trusts it under strict gates: strong support,
+// wide span, realistic handheld tilt (0.8°–4°). Anything else: no rotation.
+// Runs on the cached preview once per photo, result cached on the item.
+async function detectHorizon(src) {
+  const { data, info } = await sharp(src, { failOn: 'none' }).rotate().grayscale()
+    .resize(640, 640, { fit: 'inside' }).raw().toBuffer({ resolveWithObject: true });
+  const w = info.width, h = info.height;
+  const edges = [];
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+    const gy = (data[(y + 1) * w + x - 1] + 2 * data[(y + 1) * w + x] + data[(y + 1) * w + x + 1])
+      - (data[(y - 1) * w + x - 1] + 2 * data[(y - 1) * w + x] + data[(y - 1) * w + x + 1]);
+    if (Math.abs(gy) > 60) edges.push({ x, y, m: Math.abs(gy) });
+  }
+  if (edges.length < 200) return { angle: 0, auto: false };
+  edges.sort((a, b) => b.m - a.m);
+  const pts = edges.slice(0, Math.min(6000, edges.length));
+  const STEP = 0.2, RANGE = 10, nA = Math.round(2 * RANGE / STEP) + 1;
+  const acc = new Map(); let best = { v: 0, a: 0, rho: 0 };
+  for (let ai = 0; ai < nA; ai++) {
+    const deg = -RANGE + ai * STEP, t = Math.tan(deg * Math.PI / 180);
+    for (const p of pts) {
+      const rho = Math.round(p.y - p.x * t), key = ai * 100000 + rho;
+      const v = (acc.get(key) || 0) + 1; acc.set(key, v);
+      if (v > best.v) best = { v, a: deg, rho };
+    }
+  }
+  const t = Math.tan(best.a * Math.PI / 180);
+  let minX = 1e9, maxX = -1e9;
+  for (const p of pts) { if (Math.abs(p.y - p.x * t - best.rho) <= 2) { if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x; } }
+  const span = (maxX - minX) / w;
+  const auto = best.v > 80 && span > 0.6 && Math.abs(best.a) >= 0.8 && Math.abs(best.a) <= 4;
+  return { angle: +best.a.toFixed(1), auto };
+}
+
+async function ensureHorizon(it) {
+  if (it.horizon || it.type !== 'img' || it.error) return;
+  const prev = path.join(prevDir(lib.root), it.id + '.jpg');
+  try { it.horizon = fs.existsSync(prev) ? await detectHorizon(prev) : { angle: 0, auto: false }; }
+  catch { it.horizon = { angle: 0, auto: false }; }
+  saveIndexSoon();
+}
+
+// Auto unless the user switched this photo's leveling off.
+const effectiveTilt = (it) => (it.horizon && it.horizon.auto && it.level !== false) ? it.horizon.angle : 0;
+
+// Largest same-aspect axis-aligned rectangle inside a rotated w×h image.
+function inscribedRect(w, h, deg) {
+  const rad = Math.abs(deg) * Math.PI / 180, sin = Math.sin(rad), cos = Math.cos(rad);
+  const longer = Math.max(w, h), shorter = Math.min(w, h);
+  let cw, ch;
+  if (shorter <= 2 * sin * cos * longer) {
+    const x = 0.5 * shorter;
+    if (w >= h) { cw = x / sin; ch = x / cos; } else { cw = x / cos; ch = x / sin; }
+  } else {
+    const d = cos * cos - sin * sin;
+    cw = (w * cos - h * sin) / d; ch = (h * cos - w * sin) / d;
+  }
+  return { cw: Math.floor(cw), ch: Math.floor(ch) };
+}
+
+// One engine, six looks (+ optional horizon leveling). Returns a sharp
+// pipeline ready to encode.
+async function buildLook(src, lookName, tilt = 0) {
   const look = LOOKS[lookName] || LOOKS[DEFAULT_LOOK];
   const m = await measureTones(src);
 
@@ -675,7 +740,23 @@ async function buildLook(src, lookName) {
   const b0 = 8 - a * bp;
   const luts = buildLUTs(look.curve, a, b0);
 
-  const { data, info } = await sharp(src, { failOn: 'none' }).rotate().raw().toBuffer({ resolveWithObject: true });
+  // sharp allows one rotation per pipeline: normalize EXIF orientation first,
+  // then (if leveling) tilt-rotate and crop away the wedges in a second pass.
+  let input = src;
+  if (tilt) {
+    const exifed = await sharp(src, { failOn: 'none' }).rotate().toBuffer({ resolveWithObject: true });
+    const { cw, ch: cH } = inscribedRect(exifed.info.width, exifed.info.height, tilt);
+    const rot = await sharp(exifed.data).rotate(-tilt, { background: '#000' }).toBuffer({ resolveWithObject: true });
+    const left = Math.max(0, Math.round((rot.info.width - cw) / 2));
+    const top = Math.max(0, Math.round((rot.info.height - cH) / 2));
+    input = await sharp(rot.data).extract({
+      left, top,
+      width: Math.min(cw, rot.info.width - left),
+      height: Math.min(cH, rot.info.height - top),
+    }).png().toBuffer(); // lossless intermediate — jpeg here would double-compress
+  }
+
+  const { data, info } = await sharp(input, { failOn: 'none' }).rotate().raw().toBuffer({ resolveWithObject: true });
   const ch = info.channels;
   if (look.mono) {
     // Orange-filter style channel mix: flatters skin, adds drama to skies.
@@ -716,8 +797,8 @@ async function buildLook(src, lookName) {
   return pipe.sharpen({ sigma: look.sharpen });
 }
 
-async function enhanceOne(src, dst, lookName) {
-  const pipe = await buildLook(src, lookName);
+async function enhanceOne(src, dst, lookName, tilt = 0) {
+  const pipe = await buildLook(src, lookName, tilt);
   // Quality lock: q95 + full-resolution color (no 4:2:0 subsampling).
   await pipe.jpeg({ quality: 95, chromaSubsampling: '4:4:4', mozjpeg: true }).toFile(dst);
   // The pixel round trip drops the camera EXIF, so copy it back — minus
@@ -731,15 +812,18 @@ async function exportEdits() {
   const root = lib.root;
   const shootLabel = Object.fromEntries(lib.shoots.map(s => [s.id, sanitize(s.label)]));
   const targets = lib.items.filter(i => i.pick && i.type === 'img' && !i.error && !i.inRejects);
-  let made = 0;
+  let made = 0, leveled = 0;
   const errors = [];
   await pool(targets, 3, async (it) => {
     try {
+      await ensureHorizon(it);
+      const tilt = effectiveTilt(it);
+      if (tilt) leveled++;
       const base = it.name.slice(0, -path.extname(it.name).length) + '.jpg';
       const dst = await uniquePath(path.join(appDir(root), 'Edited', shootLabel[it.shoot] || 'Shoot', base));
       await fsp.mkdir(path.dirname(dst), { recursive: true });
       if (SHARP_EXTS.has(it.ext)) {
-        await enhanceOne(it.abs, dst, it.look);       // full original resolution
+        await enhanceOne(it.abs, dst, it.look, tilt);  // full original resolution
       } else {
         // RAW: enhance the biggest JPEG we can get out of the file.
         const tmp = dst + '.extract.jpg';
@@ -749,7 +833,7 @@ async function exportEdits() {
         }
         const src = got ? tmp : path.join(prevDir(root), it.id + '.jpg');
         if (!fs.existsSync(src)) throw new Error('no source available');
-        await enhanceOne(src, dst, it.look);
+        await enhanceOne(src, dst, it.look, tilt);
         await fsp.unlink(tmp).catch(() => {});
       }
       made++;
@@ -757,7 +841,7 @@ async function exportEdits() {
       errors.push(`${it.name}: ${e.message}`);
     }
   });
-  return { made, errorCount: errors.length, errors: errors.slice(0, 5), dir: path.join(appDir(root), 'Edited') };
+  return { made, leveled, errorCount: errors.length, errors: errors.slice(0, 5), dir: path.join(appDir(root), 'Edited') };
 }
 
 function reportCSV() {
@@ -928,7 +1012,10 @@ app.get('/api/look/:id', ah(async (req, res) => {
   const prev = path.join(prevDir(lib.root), req.params.id + '.jpg');
   if (!fs.existsSync(prev)) return res.status(404).end();
   const name = LOOKS[req.query.name] ? req.query.name : DEFAULT_LOOK;
-  const pipe = await buildLook(prev, name);
+  const it = lib.items.find(i => i.id === req.params.id);
+  let tilt = 0;
+  if (it) { await ensureHorizon(it); tilt = effectiveTilt(it); }
+  const pipe = await buildLook(prev, name, tilt);
   const buf = await pipe.jpeg({ quality: 85 }).toBuffer();
   res.setHeader('Content-Type', 'image/jpeg');
   res.setHeader('Cache-Control', 'no-store');
@@ -1000,8 +1087,10 @@ app.post('/api/flag', ah(async (req, res) => {
   if (patch.reject !== undefined) { it.reject = !!patch.reject; if (it.reject) it.pick = false; }
   if (patch.stars !== undefined) it.stars = Math.max(0, Math.min(5, patch.stars | 0));
   if (patch.look !== undefined) it.look = LOOKS[patch.look] ? patch.look : null;
+  if (patch.level !== undefined) it.level = patch.level === 'off' ? false : null;
+  if (patch.level !== undefined) await ensureHorizon(it);
   saveIndexSoon();
-  res.json({ pick: it.pick, reject: it.reject, stars: it.stars, look: it.look || null });
+  res.json({ pick: it.pick, reject: it.reject, stars: it.stars, look: it.look || null, level: it.level === false ? 'off' : 'auto', horizon: it.horizon || null });
 }));
 
 app.post('/api/autocull', ah(async (req, res) => res.json(autocull())));

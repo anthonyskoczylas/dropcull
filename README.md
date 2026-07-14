@@ -16,7 +16,8 @@ When you're done choosing:
 - **Copy picks to Selects** — keepers copied into a clean folder, sorted by shoot
 - **Client proof JPEGs** — one click makes web-sized previews to send a client
 - **Auto-edit picks** — one click batch-edits every keeper into full-resolution JPEGs in `_DropCull/Edited`, sorted by shoot — originals never touched. Free and offline
-- **Five looks, chosen per photo** — in the big view, tap a look to preview it on that photo: **Costa Rica** (vivid ocean blues + lush greens — the default), **Natural** (invisible polish), **Golden Hour** (warm sunset glow), **Bold** (maximum pop), **Black & White**. The batch edit applies each photo's chosen look
+- **Six looks, chosen per photo** — in the big view, tap a look to preview it on that photo: **Costa Rica** (vivid ocean blues + lush greens — the default), **Natural** (invisible polish), **Golden Hour** (warm cinematic glow), **Bold** (maximum pop), **Black & White** (dramatic film-style mono), **Film** (faded analog vibe). The batch edit applies each photo's chosen look
+- **Horizon auto-leveling** — tilted ocean shots get straightened and cropped clean automatically during auto-edit (only when a real horizon is clearly found — portraits and such are left alone). Per-photo Auto/Off switch in the big view; the preview shows the leveled result
 - **Sweep rejects** — junk moves into a `_DropCull/Rejects` folder. Nothing is ever deleted, and one click brings it all back
 
 Everything runs locally. No account, no upload, no subscription, no internet needed after setup.

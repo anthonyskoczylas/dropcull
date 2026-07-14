@@ -160,8 +160,15 @@ async function flag(patch) {
     body: JSON.stringify({ id: it.id, patch }),
   }).then(r => r.json());
   it.pick = r.pick; it.reject = r.reject; it.stars = r.stars; it.look = r.look;
+  if (r.level !== undefined) { it.level = r.level; it.horizon = r.horizon; }
   updateCell(state.sel);
   if (state.loupeOpen) renderLoupeInfo(it);
+}
+
+// swap the big-view image to the live edited preview (look + leveling)
+function refreshLoupePreview(i) {
+  const img = $('#loupeMedia img');
+  if (img) img.src = `/api/look/${i.id}?name=${i.look || state.defaultLook}&t=${Date.now()}`;
 }
 
 // ---------------------------------------------------------------- loupe
@@ -188,12 +195,25 @@ function renderLoupeInfo(i) {
       `<button data-look="${l.key}" class="${l.key === active ? 'on' : ''}">${l.label}</button>`).join('');
     $('#llooks').querySelectorAll('button').forEach(b => b.onclick = async () => {
       await flag({ look: b.dataset.look });
-      const img = $('#loupeMedia img');
-      if (img) img.src = `/api/look/${i.id}?name=${b.dataset.look}&t=${Date.now()}`;
+      refreshLoupePreview(i);
     });
     $('#llooks').hidden = false; $('.llookshead').hidden = false;
+
+    // horizon leveling: Auto (with the found angle) / Off for this photo
+    const lv = i.level === 'off' || i.level === false ? 'off' : 'auto';
+    const ang = i.horizon && i.horizon.auto ? ` ${i.horizon.angle > 0 ? '−' : '+'}${Math.abs(i.horizon.angle)}°` : '';
+    const found = i.horizon ? (i.horizon.auto ? `Auto${ang}` : 'Auto · no tilt found') : 'Auto';
+    $('#llevel').innerHTML =
+      `<button data-lv="auto" class="${lv === 'auto' ? 'on' : ''}">${found}</button>` +
+      `<button data-lv="off" class="${lv === 'off' ? 'on' : ''}">Off</button>`;
+    $('#llevel').querySelectorAll('button').forEach(b => b.onclick = async () => {
+      await flag({ level: b.dataset.lv });
+      refreshLoupePreview(state.filtered[state.sel]);
+    });
+    $('#llevel').hidden = false; $('#llevelhead').hidden = false;
   } else {
     $('#llooks').hidden = true; $('.llookshead').hidden = true;
+    $('#llevel').hidden = true; $('#llevelhead').hidden = true;
   }
 
   const e = i.exif || {};
@@ -459,7 +479,8 @@ function wireActions() {
     toast(`Auto-editing ${n} photos… hang tight.`);
     try {
       const r = await post('/api/export/edits');
-      const msg = r.errorCount ? `${r.made} edited, ${r.errorCount} skipped.` : `${r.made} photos edited.`;
+      let msg = r.errorCount ? `${r.made} edited, ${r.errorCount} skipped.` : `${r.made} photos edited.`;
+      if (r.leveled) msg += ` ${r.leveled} auto-leveled.`;
       toast(msg, { sticky: true, action: 'Open folder', onAction: () => fetch('/api/open', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: r.dir }) }) });
     } catch (e) { toast(e.message, { bad: true }); }
   };
