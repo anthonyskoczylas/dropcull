@@ -790,6 +790,18 @@ function undoAutocull() {
 // ---------------------------------------------------------------- server
 const app = express();
 app.use(express.json({ limit: '2mb' }));
+
+// Serve index.html with the version stamped into asset URLs, so every update
+// automatically busts stale browser caches (no hard-refresh support calls).
+app.get(['/', '/index.html'], (req, res) => {
+  let ver = 'dev';
+  try { ver = fs.readFileSync(path.join(__dirname, 'VERSION'), 'utf8').trim(); } catch { /* dev */ }
+  const html = fs.readFileSync(path.join(__dirname, 'public', 'index.html'), 'utf8').replaceAll('__V__', ver);
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.send(html);
+});
+
 app.use(express.static(path.join(__dirname, 'public')));
 
 const ah = (fn) => (req, res) => Promise.resolve(fn(req, res)).catch(e => {
