@@ -14,6 +14,8 @@ const state = {
   loupeOpen: false,
   zoomed: false,
   scanning: false,
+  looks: [],
+  defaultLook: 'costa-rica',
 };
 
 // ---------------------------------------------------------------- filters
@@ -157,7 +159,7 @@ async function flag(patch) {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id: it.id, patch }),
   }).then(r => r.json());
-  it.pick = r.pick; it.reject = r.reject; it.stars = r.stars;
+  it.pick = r.pick; it.reject = r.reject; it.stars = r.stars; it.look = r.look;
   updateCell(state.sel);
   if (state.loupeOpen) renderLoupeInfo(it);
 }
@@ -178,6 +180,21 @@ function renderLoupeInfo(i) {
     `<span class="${i.stars >= n ? 'on' : ''}" data-n="${n}">★</span>`).join('');
   $('#lstars').querySelectorAll('span').forEach(s =>
     s.onclick = () => flag({ stars: +s.dataset.n === i.stars ? 0 : +s.dataset.n }));
+
+  // per-photo edit look chips — tapping one previews it right in the big view
+  if (i.type === 'img' && state.looks.length) {
+    const active = i.look || state.defaultLook;
+    $('#llooks').innerHTML = state.looks.map(l =>
+      `<button data-look="${l.key}" class="${l.key === active ? 'on' : ''}">${l.label}</button>`).join('');
+    $('#llooks').querySelectorAll('button').forEach(b => b.onclick = async () => {
+      await flag({ look: b.dataset.look });
+      const img = $('#loupeMedia img');
+      if (img) img.src = `/api/look/${i.id}?name=${b.dataset.look}&t=${Date.now()}`;
+    });
+    $('#llooks').hidden = false; $('.llookshead').hidden = false;
+  } else {
+    $('#llooks').hidden = true; $('.llookshead').hidden = true;
+  }
 
   const e = i.exif || {};
   const rows = [
@@ -437,7 +454,7 @@ function wireActions() {
   $('#editsBtn').onclick = async () => {
     const n = state.items.filter(i => i.pick && i.type === 'img').length;
     if (!n) return toast('No picked photos yet.', { bad: true });
-    const ok = await confirmModal('Auto-edit picks', `Batch-edits all ${n} picks — white balance, exposure, contrast, color pop and sharpening — and saves full-resolution JPEGs to _DropCull/Edited.\n\nYour originals are never touched. Big batches take a few minutes.`, 'Auto-edit');
+    const ok = await confirmModal('Auto-edit picks', `Batch-edits all ${n} picks and saves full-resolution JPEGs to _DropCull/Edited.\n\nEach photo uses the look you chose for it in the big view (Costa Rica if you didn't choose one). Originals are never touched. Big batches take a few minutes.`, 'Auto-edit');
     if (!ok) return;
     toast(`Auto-editing ${n} photos… hang tight.`);
     try {
@@ -535,6 +552,9 @@ function init() {
   show('welcome');
   connectSSE();
   wireActions();
+  fetch('/api/looks').then(r => r.json())
+    .then(j => { state.looks = j.looks || []; state.defaultLook = j.default || 'costa-rica'; })
+    .catch(() => {});
   loadLibrary();
 
   // grid interactions

@@ -447,6 +447,7 @@ async function startScan(root) {
           item.pick = !!old.pick; item.reject = !!old.reject;
           item.stars = old.stars || 0; item.inRejects = !!old.inRejects;
           item.hidden = !!old.hidden;
+          item.look = LOOKS[old.look] ? old.look : null;
         }
         lib.done++;
         if (lib.done % 5 === 0 || lib.done === lib.total) broadcast('progress', progressPayload());
@@ -618,61 +619,79 @@ async function measureTones(src) {
   return { p1: pct(0.01), p50: pct(0.5), p99: pct(0.99) };
 }
 
-// The "Costa Rica" recipe (Byron round 2: "make the blues bluer", edits should be
-// visible). Still NO white-balance meddling and NO hard histogram stretch — but
-// blues (ocean, sky) get real vibrance, greens (jungle) go lush, and the base
-// polish is strong enough to see. Skin is untouched by the selective pass
-// (skin pixels are red-dominant, so the blue/green masks skip them). Tuned and
-// verified by eye on real Costa Rica photos.
-async function enhanceOne(src, dst) {
+// The looks. Every photo can carry its own — Byron picks per photo in the big
+// view; the batch edit uses each photo's choice (Costa Rica when none chosen).
+// Shared rules across all looks: NO auto white-balance, NO hard histogram
+// stretch, skin/sand/sunset pixels are skipped by the selective color pass.
+const LOOKS = {
+  'costa-rica': { label: 'Costa Rica', blue: 0.35, green: 0.18, sat: 1.10, curve: 1.05, warm: 0, sharpen: 0.8, mono: false },
+  natural:      { label: 'Natural',    blue: 0,    green: 0,    sat: 1.06, curve: 1.00, warm: 0, sharpen: 0.6, mono: false },
+  golden:       { label: 'Golden Hour', blue: 0.10, green: 0.08, sat: 1.08, curve: 1.02, warm: 0.05, sharpen: 0.7, mono: false },
+  bold:         { label: 'Bold',       blue: 0.20, green: 0.15, sat: 1.22, curve: 1.08, warm: 0, sharpen: 1.0, mono: false },
+  bw:           { label: 'Black & White', blue: 0, green: 0,    sat: 1,    curve: 1.08, warm: 0, sharpen: 0.9, mono: true },
+};
+const DEFAULT_LOOK = 'costa-rica';
+
+// One engine, five looks. Returns a sharp pipeline ready to encode.
+async function buildLook(src, lookName) {
+  const look = LOOKS[lookName] || LOOKS[DEFAULT_LOOK];
   const m = await measureTones(src);
 
-  // Selective vibrance, pixel by pixel: how blue/green a pixel is decides how
-  // much extra saturation it gets. Red-dominant pixels (skin, sand, sunsets)
-  // pass through unchanged.
-  const { data, info } = await sharp(src, { failOn: 'none' }).rotate().raw().toBuffer({ resolveWithObject: true });
-  for (let i = 0; i < data.length; i += info.channels) {
-    const r = data[i], g = data[i + 1], b = data[i + 2];
-    const luma = 0.299 * r + 0.587 * g + 0.114 * b;
-    const blueness = b - Math.max(r, g);
-    const greenness = g - Math.max(r, b);
-    let s = 1;
-    if (blueness > 0) s = 1 + Math.min(1, blueness / 55) * 0.35;       // ocean & sky
-    else if (greenness > 0) s = 1 + Math.min(1, greenness / 55) * 0.18; // jungle
-    if (s > 1) {
-      data[i] = Math.max(0, Math.min(255, luma + (r - luma) * s));
-      data[i + 1] = Math.max(0, Math.min(255, luma + (g - luma) * s));
-      let nb = luma + (b - luma) * s;
-      if (blueness > 12) nb += Math.min(1, blueness / 55) * 5;          // touch of extra depth
-      data[i + 2] = Math.max(0, Math.min(255, nb));
+  let pipe;
+  if (look.mono) {
+    pipe = sharp(src, { failOn: 'none' }).rotate().grayscale();
+  } else if (look.blue > 0 || look.green > 0) {
+    // Selective vibrance, pixel by pixel: how blue/green a pixel is decides how
+    // much extra saturation it gets. Red-dominant pixels pass through unchanged.
+    const { data, info } = await sharp(src, { failOn: 'none' }).rotate().raw().toBuffer({ resolveWithObject: true });
+    for (let i = 0; i < data.length; i += info.channels) {
+      const r = data[i], g = data[i + 1], b = data[i + 2];
+      const luma = 0.299 * r + 0.587 * g + 0.114 * b;
+      const blueness = b - Math.max(r, g);
+      const greenness = g - Math.max(r, b);
+      let s = 1;
+      if (blueness > 0) s = 1 + Math.min(1, blueness / 55) * look.blue;
+      else if (greenness > 0) s = 1 + Math.min(1, greenness / 55) * look.green;
+      if (s > 1) {
+        data[i] = Math.max(0, Math.min(255, luma + (r - luma) * s));
+        data[i + 1] = Math.max(0, Math.min(255, luma + (g - luma) * s));
+        let nb = luma + (b - luma) * s;
+        if (blueness > 12) nb += Math.min(1, blueness / 55) * 5;
+        data[i + 2] = Math.max(0, Math.min(255, nb));
+      }
     }
+    pipe = sharp(data, { raw: { width: info.width, height: info.height, channels: info.channels } });
+  } else {
+    pipe = sharp(src, { failOn: 'none' }).rotate();
   }
-  let pipe = sharp(data, { raw: { width: info.width, height: info.height, channels: info.channels } });
 
-  // Soft black/white point + a mild S-curve on top — visible polish, never crunchy.
+  // Soft black/white point + the look's S-curve. `warm` tilts red up / blue down
+  // — only ever by explicit choice (Golden Hour), never automatically.
   const bp = Math.min(m.p1, 20), wp = Math.max(m.p99, 235);
   let a = (248 - 8) / Math.max(1, wp - bp);
   a = Math.max(1.0, Math.min(1.10, a));
   const b0 = 8 - a * bp;
-  const ca = Math.min(1.10, a * 1.05), cb = b0 - (ca - a) * 128;
-  pipe = pipe.linear([ca, ca, ca], [cb, cb, cb]);
+  const ca = Math.min(1.10, a * look.curve), cb = b0 - (ca - a) * 128;
+  // grayscale = single channel → scalar curve; color = per-channel (warm tilt)
+  if (look.mono) pipe = pipe.linear(ca, cb);
+  else pipe = pipe.linear([ca * (1 + look.warm), ca, ca * (1 - look.warm)], [cb, cb, cb]);
 
   // Underexposed shot: gamma the midtones toward healthy (118), capped at 2.0.
-  // Healthy shots (median ≥ 80) are left alone. g solves (p50/255)^(1/g) = 118/255.
   if (m.p50 < 80) {
     const g = Math.min(2.0, Math.log(Math.max(8, m.p50) / 255) / Math.log(118 / 255));
     if (g > 1.05) pipe = pipe.gamma(1.0, g);
   }
 
-  await pipe
-    .modulate({ saturation: 1.10 })
-    .sharpen({ sigma: 0.8 })
-    // Quality lock: q95 + full-resolution color (no 4:2:0 subsampling) — the
-    // edited copy keeps every pixel and every bit of color detail worth keeping.
-    .jpeg({ quality: 95, chromaSubsampling: '4:4:4', mozjpeg: true }).toFile(dst);
+  if (!look.mono && look.sat !== 1) pipe = pipe.modulate({ saturation: look.sat });
+  return pipe.sharpen({ sigma: look.sharpen });
+}
 
-  // The raw-pixel round trip drops the camera EXIF, so copy it back — minus
-  // Orientation (the pixels are already rotated; re-copying it would double-rotate).
+async function enhanceOne(src, dst, lookName) {
+  const pipe = await buildLook(src, lookName);
+  // Quality lock: q95 + full-resolution color (no 4:2:0 subsampling).
+  await pipe.jpeg({ quality: 95, chromaSubsampling: '4:4:4', mozjpeg: true }).toFile(dst);
+  // The pixel round trip drops the camera EXIF, so copy it back — minus
+  // Orientation (the pixels are already rotated; re-copying would double-rotate).
   try {
     await getExiftool().write(dst, {}, ['-TagsFromFile', src, '-Orientation=', '-overwrite_original']);
   } catch { /* metadata copy is nice-to-have, never fatal */ }
@@ -690,7 +709,7 @@ async function exportEdits() {
       const dst = await uniquePath(path.join(appDir(root), 'Edited', shootLabel[it.shoot] || 'Shoot', base));
       await fsp.mkdir(path.dirname(dst), { recursive: true });
       if (SHARP_EXTS.has(it.ext)) {
-        await enhanceOne(it.abs, dst);               // full original resolution
+        await enhanceOne(it.abs, dst, it.look);       // full original resolution
       } else {
         // RAW: enhance the biggest JPEG we can get out of the file.
         const tmp = dst + '.extract.jpg';
@@ -700,7 +719,7 @@ async function exportEdits() {
         }
         const src = got ? tmp : path.join(prevDir(root), it.id + '.jpg');
         if (!fs.existsSync(src)) throw new Error('no source available');
-        await enhanceOne(src, dst);
+        await enhanceOne(src, dst, it.look);
         await fsp.unlink(tmp).catch(() => {});
       }
       made++;
@@ -860,6 +879,24 @@ app.get('/api/preview/:id', (req, res) => {
   res.sendFile(path.join(prevDir(lib.root), req.params.id + '.jpg'), (err) => { if (err) res.status(404).end(); });
 });
 
+// Live look preview: applies a look to the cached preview (not the original)
+// on the fly, so the big view can show exactly what the edit will look like.
+app.get('/api/look/:id', ah(async (req, res) => {
+  if (!lib.root) return res.status(404).end();
+  const prev = path.join(prevDir(lib.root), req.params.id + '.jpg');
+  if (!fs.existsSync(prev)) return res.status(404).end();
+  const name = LOOKS[req.query.name] ? req.query.name : DEFAULT_LOOK;
+  const pipe = await buildLook(prev, name);
+  const buf = await pipe.jpeg({ quality: 85 }).toBuffer();
+  res.setHeader('Content-Type', 'image/jpeg');
+  res.setHeader('Cache-Control', 'no-store');
+  res.end(buf);
+}));
+
+app.get('/api/looks', (req, res) => {
+  res.json({ default: DEFAULT_LOOK, looks: Object.entries(LOOKS).map(([key, l]) => ({ key, label: l.label })) });
+});
+
 // Full original file, with Range support so videos scrub smoothly.
 app.get('/api/media/:id', ah(async (req, res) => {
   const it = lib.items.find(i => i.id === req.params.id);
@@ -920,8 +957,9 @@ app.post('/api/flag', ah(async (req, res) => {
   if (patch.pick !== undefined) { it.pick = !!patch.pick; if (it.pick) it.reject = false; }
   if (patch.reject !== undefined) { it.reject = !!patch.reject; if (it.reject) it.pick = false; }
   if (patch.stars !== undefined) it.stars = Math.max(0, Math.min(5, patch.stars | 0));
+  if (patch.look !== undefined) it.look = LOOKS[patch.look] ? patch.look : null;
   saveIndexSoon();
-  res.json({ pick: it.pick, reject: it.reject, stars: it.stars });
+  res.json({ pick: it.pick, reject: it.reject, stars: it.stars, look: it.look || null });
 }));
 
 app.post('/api/autocull', ah(async (req, res) => res.json(autocull())));

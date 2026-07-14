@@ -15,7 +15,8 @@ When you're done choosing:
 - **Send ratings to Lightroom** — your stars show up automatically when you import (RAW files get a tiny `.xmp` sidecar file; the originals are never touched)
 - **Copy picks to Selects** — keepers copied into a clean folder, sorted by shoot
 - **Client proof JPEGs** — one click makes web-sized previews to send a client
-- **Auto-edit picks** — one click batch-edits every keeper: each photo gets measured and gets its own fix (white balance, exposure lift for dark shots, contrast, color pop, sharpening). Full-resolution JPEGs land in `_DropCull/Edited`, sorted by shoot — originals never touched. Same idea as the paid AI editors, free and offline
+- **Auto-edit picks** — one click batch-edits every keeper into full-resolution JPEGs in `_DropCull/Edited`, sorted by shoot — originals never touched. Free and offline
+- **Five looks, chosen per photo** — in the big view, tap a look to preview it on that photo: **Costa Rica** (vivid ocean blues + lush greens — the default), **Natural** (invisible polish), **Golden Hour** (warm sunset glow), **Bold** (maximum pop), **Black & White**. The batch edit applies each photo's chosen look
 - **Sweep rejects** — junk moves into a `_DropCull/Rejects` folder. Nothing is ever deleted, and one click brings it all back
 
 Everything runs locally. No account, no upload, no subscription, no internet needed after setup.
