@@ -624,28 +624,68 @@ async function measureTones(src) {
 // Shared rules across all looks: NO auto white-balance, NO hard histogram
 // stretch, skin/sand/sunset pixels are skipped by the selective color pass.
 const LOOKS = {
-  'costa-rica': { label: 'Costa Rica', blue: 0.35, green: 0.18, sat: 1.10, curve: 1.05, warm: 0, sharpen: 0.8, mono: false },
-  natural:      { label: 'Natural',    blue: 0,    green: 0,    sat: 1.06, curve: 1.00, warm: 0, sharpen: 0.6, mono: false },
-  golden:       { label: 'Golden Hour', blue: 0.10, green: 0.08, sat: 1.08, curve: 1.02, warm: 0.05, sharpen: 0.7, mono: false },
-  bold:         { label: 'Bold',       blue: 0.20, green: 0.15, sat: 1.22, curve: 1.08, warm: 0, sharpen: 1.0, mono: false },
-  bw:           { label: 'Black & White', blue: 0, green: 0,    sat: 1,    curve: 1.08, warm: 0, sharpen: 0.9, mono: true },
+  'costa-rica': { label: 'Costa Rica', blue: 0.35, green: 0.18, sat: 1.10, sharpen: 0.8,
+    curve: { contrast: 1.06, mid: 0.46, floor: 5, ceil: 250, shoulder: 0.35, hi: { r: 3, g: 1, b: 0 }, sh: { r: 0, g: 0, b: 2 } } },
+  natural: { label: 'Natural', blue: 0, green: 0, sat: 1.06, sharpen: 0.6,
+    curve: { contrast: 1.03, mid: 0.48, floor: 3, ceil: 251, shoulder: 0.25 } },
+  golden: { label: 'Golden Hour', blue: 0.08, green: 0.06, sat: 1.10, sharpen: 0.7,
+    curve: { contrast: 1.04, mid: 0.46, floor: 10, ceil: 252, shoulder: 0.4, hi: { r: 11, g: 4, b: -4 }, sh: { r: -3, g: 0, b: 3 } } },
+  bold: { label: 'Bold', blue: 0.22, green: 0.16, sat: 1.24, sharpen: 1.0,
+    curve: { contrast: 1.13, mid: 0.47, floor: 2, ceil: 253, shoulder: 0.3, hi: { r: 2, g: 0, b: 0 }, sh: { r: 0, g: 0, b: 3 } } },
+  bw: { label: 'Black & White', mono: true, sat: 1, sharpen: 0.9,
+    curve: { contrast: 1.11, mid: 0.45, floor: 3, ceil: 252, shoulder: 0.4 } },
+  film: { label: 'Film', blue: 0.06, green: 0.05, sat: 0.94, sharpen: 0.55,
+    curve: { contrast: 1.02, mid: 0.5, floor: 19, ceil: 246, shoulder: 0.5, hi: { r: 6, g: 3, b: -2 }, sh: { r: -2, g: 2, b: 4 } } },
 };
 const DEFAULT_LOOK = 'costa-rica';
 
-// One engine, five looks. Returns a sharp pipeline ready to encode.
+// Film-style per-channel tone curves as lookup tables: contrast around a
+// midpoint, soft highlight shoulder, black floor / white ceiling (faded-film
+// blacks), and split-toning (different color offsets for highlights vs
+// shadows). The photo's own adaptive haze-cut (adaptA/adaptB from its
+// histogram) is baked into the same table, so one lookup does everything.
+function buildLUTs(p, adaptA, adaptB) {
+  const { contrast = 1, mid = 0.48, floor = 0, ceil = 255, shoulder = 0.3,
+    hi = { r: 0, g: 0, b: 0 }, sh = { r: 0, g: 0, b: 0 } } = p;
+  const smooth = (t) => t < 0 ? 0 : t > 1 ? 1 : t * t * (3 - 2 * t);
+  const luts = [new Uint8ClampedArray(256), new Uint8ClampedArray(256), new Uint8ClampedArray(256)];
+  for (let x = 0; x < 256; x++) {
+    let t = Math.max(0, Math.min(255, adaptA * x + adaptB)) / 255; // per-photo haze cut
+    t = mid + (t - mid) * contrast;
+    t = (1 - shoulder) * t + shoulder * smooth(t);
+    t = Math.max(0, Math.min(1, t));
+    const base = floor + t * (ceil - floor);
+    const hiZ = smooth((t - 0.55) / 0.45), shZ = 1 - smooth(t / 0.45);
+    luts[0][x] = base + hi.r * hiZ + sh.r * shZ;
+    luts[1][x] = base + hi.g * hiZ + sh.g * shZ;
+    luts[2][x] = base + hi.b * hiZ + sh.b * shZ;
+  }
+  return luts;
+}
+
+// One engine, six looks. Returns a sharp pipeline ready to encode.
 async function buildLook(src, lookName) {
   const look = LOOKS[lookName] || LOOKS[DEFAULT_LOOK];
   const m = await measureTones(src);
 
-  let pipe;
+  // Per-photo haze cut: map [p1,p99] gently toward full range, slope capped.
+  const bp = Math.min(m.p1, 20), wp = Math.max(m.p99, 235);
+  let a = (248 - 8) / Math.max(1, wp - bp);
+  a = Math.max(1.0, Math.min(1.10, a));
+  const b0 = 8 - a * bp;
+  const luts = buildLUTs(look.curve, a, b0);
+
+  const { data, info } = await sharp(src, { failOn: 'none' }).rotate().raw().toBuffer({ resolveWithObject: true });
+  const ch = info.channels;
   if (look.mono) {
-    pipe = sharp(src, { failOn: 'none' }).rotate().grayscale();
-  } else if (look.blue > 0 || look.green > 0) {
-    // Selective vibrance, pixel by pixel: how blue/green a pixel is decides how
-    // much extra saturation it gets. Red-dominant pixels pass through unchanged.
-    const { data, info } = await sharp(src, { failOn: 'none' }).rotate().raw().toBuffer({ resolveWithObject: true });
-    for (let i = 0; i < data.length; i += info.channels) {
-      const r = data[i], g = data[i + 1], b = data[i + 2];
+    // Orange-filter style channel mix: flatters skin, adds drama to skies.
+    for (let i = 0; i < data.length; i += ch) {
+      const v = luts[0][Math.max(0, Math.min(255, (0.45 * data[i] + 0.42 * data[i + 1] + 0.13 * data[i + 2]) | 0))];
+      data[i] = v; data[i + 1] = v; data[i + 2] = v;
+    }
+  } else {
+    for (let i = 0; i < data.length; i += ch) {
+      let r = data[i], g = data[i + 1], b = data[i + 2];
       const luma = 0.299 * r + 0.587 * g + 0.114 * b;
       const blueness = b - Math.max(r, g);
       const greenness = g - Math.max(r, b);
@@ -653,28 +693,18 @@ async function buildLook(src, lookName) {
       if (blueness > 0) s = 1 + Math.min(1, blueness / 55) * look.blue;
       else if (greenness > 0) s = 1 + Math.min(1, greenness / 55) * look.green;
       if (s > 1) {
-        data[i] = Math.max(0, Math.min(255, luma + (r - luma) * s));
-        data[i + 1] = Math.max(0, Math.min(255, luma + (g - luma) * s));
-        let nb = luma + (b - luma) * s;
-        if (blueness > 12) nb += Math.min(1, blueness / 55) * 5;
-        data[i + 2] = Math.max(0, Math.min(255, nb));
+        // luminance guard: no vibrance push in deep shadows/highlights (noise)
+        const guard = luma < 30 ? luma / 30 : luma > 225 ? (255 - luma) / 30 : 1;
+        const k = 1 + (s - 1) * guard;
+        r = luma + (r - luma) * k; g = luma + (g - luma) * k;
+        b = luma + (b - luma) * k + (blueness > 12 ? Math.min(1, blueness / 55) * 5 * guard : 0);
       }
+      data[i] = luts[0][Math.max(0, Math.min(255, r | 0))];
+      data[i + 1] = luts[1][Math.max(0, Math.min(255, g | 0))];
+      data[i + 2] = luts[2][Math.max(0, Math.min(255, b | 0))];
     }
-    pipe = sharp(data, { raw: { width: info.width, height: info.height, channels: info.channels } });
-  } else {
-    pipe = sharp(src, { failOn: 'none' }).rotate();
   }
-
-  // Soft black/white point + the look's S-curve. `warm` tilts red up / blue down
-  // — only ever by explicit choice (Golden Hour), never automatically.
-  const bp = Math.min(m.p1, 20), wp = Math.max(m.p99, 235);
-  let a = (248 - 8) / Math.max(1, wp - bp);
-  a = Math.max(1.0, Math.min(1.10, a));
-  const b0 = 8 - a * bp;
-  const ca = Math.min(1.10, a * look.curve), cb = b0 - (ca - a) * 128;
-  // grayscale = single channel → scalar curve; color = per-channel (warm tilt)
-  if (look.mono) pipe = pipe.linear(ca, cb);
-  else pipe = pipe.linear([ca * (1 + look.warm), ca, ca * (1 - look.warm)], [cb, cb, cb]);
+  let pipe = sharp(data, { raw: { width: info.width, height: info.height, channels: ch } });
 
   // Underexposed shot: gamma the midtones toward healthy (118), capped at 2.0.
   if (m.p50 < 80) {
