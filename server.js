@@ -618,30 +618,64 @@ async function measureTones(src) {
   return { p1: pct(0.01), p50: pct(0.5), p99: pct(0.99) };
 }
 
-// Philosophy: do less. A good auto-edit is invisible — polish, never a makeover.
-// Deliberately NO white-balance meddling (it murders sunsets and skin tones) and
-// NO hard histogram stretch (it crushes moody light). Tuned on real photos.
+// The "Costa Rica" recipe (Byron round 2: "make the blues bluer", edits should be
+// visible). Still NO white-balance meddling and NO hard histogram stretch — but
+// blues (ocean, sky) get real vibrance, greens (jungle) go lush, and the base
+// polish is strong enough to see. Skin is untouched by the selective pass
+// (skin pixels are red-dominant, so the blue/green masks skip them). Tuned and
+// verified by eye on real Costa Rica photos.
 async function enhanceOne(src, dst) {
   const m = await measureTones(src);
-  // Soft black/white point: map [bp,wp] → [8,248] with the slope capped at 1.10,
-  // so hazy/flat shots get cleaned but nothing ever turns crunchy.
+
+  // Selective vibrance, pixel by pixel: how blue/green a pixel is decides how
+  // much extra saturation it gets. Red-dominant pixels (skin, sand, sunsets)
+  // pass through unchanged.
+  const { data, info } = await sharp(src, { failOn: 'none' }).rotate().raw().toBuffer({ resolveWithObject: true });
+  for (let i = 0; i < data.length; i += info.channels) {
+    const r = data[i], g = data[i + 1], b = data[i + 2];
+    const luma = 0.299 * r + 0.587 * g + 0.114 * b;
+    const blueness = b - Math.max(r, g);
+    const greenness = g - Math.max(r, b);
+    let s = 1;
+    if (blueness > 0) s = 1 + Math.min(1, blueness / 55) * 0.35;       // ocean & sky
+    else if (greenness > 0) s = 1 + Math.min(1, greenness / 55) * 0.18; // jungle
+    if (s > 1) {
+      data[i] = Math.max(0, Math.min(255, luma + (r - luma) * s));
+      data[i + 1] = Math.max(0, Math.min(255, luma + (g - luma) * s));
+      let nb = luma + (b - luma) * s;
+      if (blueness > 12) nb += Math.min(1, blueness / 55) * 5;          // touch of extra depth
+      data[i + 2] = Math.max(0, Math.min(255, nb));
+    }
+  }
+  let pipe = sharp(data, { raw: { width: info.width, height: info.height, channels: info.channels } });
+
+  // Soft black/white point + a mild S-curve on top — visible polish, never crunchy.
   const bp = Math.min(m.p1, 20), wp = Math.max(m.p99, 235);
   let a = (248 - 8) / Math.max(1, wp - bp);
   a = Math.max(1.0, Math.min(1.10, a));
-  const b = 8 - a * bp;
-  let pipe = sharp(src, { failOn: 'none' }).rotate();
-  if (a > 1.005 || Math.abs(b) > 1.5) pipe = pipe.linear([a, a, a], [b, b, b]);
+  const b0 = 8 - a * bp;
+  const ca = Math.min(1.10, a * 1.05), cb = b0 - (ca - a) * 128;
+  pipe = pipe.linear([ca, ca, ca], [cb, cb, cb]);
+
   // Underexposed shot: gamma the midtones toward healthy (118), capped at 2.0.
   // Healthy shots (median ≥ 80) are left alone. g solves (p50/255)^(1/g) = 118/255.
   if (m.p50 < 80) {
     const g = Math.min(2.0, Math.log(Math.max(8, m.p50) / 255) / Math.log(118 / 255));
     if (g > 1.05) pipe = pipe.gamma(1.0, g);
   }
+
   await pipe
-    .modulate({ saturation: 1.06 })                 // whisper of pop
-    .sharpen({ sigma: 0.6 })
-    .withMetadata()                                 // keep camera EXIF in the copy
-    .jpeg({ quality: 90, mozjpeg: true }).toFile(dst);
+    .modulate({ saturation: 1.10 })
+    .sharpen({ sigma: 0.8 })
+    // Quality lock: q95 + full-resolution color (no 4:2:0 subsampling) — the
+    // edited copy keeps every pixel and every bit of color detail worth keeping.
+    .jpeg({ quality: 95, chromaSubsampling: '4:4:4', mozjpeg: true }).toFile(dst);
+
+  // The raw-pixel round trip drops the camera EXIF, so copy it back — minus
+  // Orientation (the pixels are already rotated; re-copying it would double-rotate).
+  try {
+    await getExiftool().write(dst, {}, ['-TagsFromFile', src, '-Orientation=', '-overwrite_original']);
+  } catch { /* metadata copy is nice-to-have, never fatal */ }
 }
 
 async function exportEdits() {
