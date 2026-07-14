@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DropCull</title>
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%230c1113'/><path d='M50 18 L50 58 M32 44 L50 62 L68 44' stroke='%232dd4bf' stroke-width='9' fill='none' stroke-linecap='round' stroke-linejoin='round'/><rect x='24' y='72' width='52' height='9' rx='4.5' fill='%232dd4bf'/></svg>">
+</head>
+<body>
+
+<header id="topbar">
+  <div class="brand">
+    <svg viewBox="0 0 100 100" width="26" height="26" aria-hidden="true"><rect width="100" height="100" rx="22" fill="#10181a"/><path d="M50 18 L50 58 M32 44 L50 62 L68 44" stroke="#2dd4bf" stroke-width="9" fill="none" stroke-linecap="round" stroke-linejoin="round"/><rect x="24" y="72" width="52" height="9" rx="4.5" fill="#2dd4bf"/></svg>
+    <div>
+      <h1>DropCull</h1>
+      <span class="tag">drop it in · keep the best · edit sooner</span>
+    </div>
+  </div>
+  <div id="proj" class="proj" hidden></div>
+  <div id="headstats" class="headstats"></div>
+</header>
+
+<!-- Welcome / drop screen -->
+<section id="welcome">
+  <div class="hero">
+    <div id="dropzone" class="dropzone" tabindex="0">
+      <svg viewBox="0 0 100 100" width="64" height="64" aria-hidden="true"><path d="M50 14 L50 60 M28 40 L50 62 L72 40" stroke="#2dd4bf" stroke-width="8" fill="none" stroke-linecap="round" stroke-linejoin="round"/><rect x="20" y="74" width="60" height="8" rx="4" fill="#2dd4bf"/></svg>
+      <h2>Drop your photos &amp; videos here</h2>
+      <p>Drag a whole folder or card dump straight in.<br>Camera, drone, RAW files, video clips — all of it.</p>
+      <div class="or">or</div>
+      <div class="pickrow">
+        <button id="pickBtn" class="btn primary">Choose a folder on this computer</button>
+      </div>
+      <details class="manual">
+        <summary>Type a folder path instead</summary>
+        <div class="manualrow">
+          <input id="pathInput" type="text" placeholder="/Users/you/Pictures/Shoot-July" spellcheck="false">
+          <button id="pathGo" class="btn">Scan</button>
+        </div>
+      </details>
+    </div>
+    <div class="privacy">Everything stays on this computer. Nothing is uploaded, nothing is deleted — ever.</div>
+  </div>
+</section>
+
+<!-- Scan progress -->
+<section id="progress" hidden>
+  <div class="progresscard">
+    <h2 id="progTitle">Reading your files…</h2>
+    <div class="bar"><div id="progFill"></div></div>
+    <div class="progmeta"><span id="progCount"></span><span id="progFile"></span></div>
+    <p class="progHint">First pass builds previews and checks every shot for blur, exposure and duplicates. Next time this folder opens instantly.</p>
+  </div>
+</section>
+
+<!-- Main studio -->
+<div id="studio" hidden>
+  <aside id="sidebar">
+    <nav id="filters" class="filters"></nav>
+    <div class="side-sec">
+      <h3>Shoots</h3>
+      <div id="shootList" class="shootlist"></div>
+    </div>
+    <div class="side-sec actions">
+      <h3>Workflow</h3>
+      <button id="autocullBtn" class="btn primary wide">Auto-Cull</button>
+      <button id="ratingsBtn" class="btn wide">Send ratings to Lightroom</button>
+      <button id="selectsBtn" class="btn wide">Copy picks to Selects</button>
+      <button id="proofsBtn" class="btn wide">Make client proof JPEGs</button>
+      <button id="editsBtn" class="btn wide">Auto-edit picks to JPEGs</button>
+      <button id="rejectsBtn" class="btn wide danger">Sweep rejects into folder</button>
+      <button id="undoMoveBtn" class="btn wide subtle">Bring rejects back</button>
+      <button id="unhideAllBtn" class="btn wide subtle" hidden>Restore removed photos</button>
+      <a id="reportBtn" class="btn wide subtle" href="/api/export/report" download>Download CSV report</a>
+      <button id="newBtn" class="btn wide subtle">Open a different folder</button>
+    </div>
+    <div class="keys">
+      <h3>Keys</h3>
+      <div><kbd>←</kbd><kbd>→</kbd> move</div>
+      <div><kbd>P</kbd> pick &nbsp;<kbd>X</kbd> reject &nbsp;<kbd>U</kbd> clear</div>
+      <div><kbd>1</kbd>–<kbd>5</kbd> stars &nbsp;<kbd>0</kbd> clear</div>
+      <div><kbd>Enter</kbd> big view &nbsp;<kbd>Esc</kbd> close</div>
+      <div><kbd>Del</kbd> remove from DropCull (file stays)</div>
+    </div>
+  </aside>
+  <main id="grid" tabindex="0"></main>
+</div>
+
+<!-- Loupe (big view) -->
+<div id="loupe" hidden>
+  <div class="loupe-media" id="loupeMedia"></div>
+  <aside class="loupe-info">
+    <div id="loupeName" class="lname"></div>
+    <div id="loupeFlags" class="lflags"></div>
+    <div class="lbtns">
+      <button id="lpick" class="btn pickbtn">Pick <kbd>P</kbd></button>
+      <button id="lreject" class="btn rejbtn">Reject <kbd>X</kbd></button>
+    </div>
+    <div id="lstars" class="lstars" title="Stars (keys 1-5)"></div>
+    <table id="loupeExif" class="lexif"></table>
+    <button id="lreveal" class="btn wide subtle">Show in Finder</button><!-- label swapped to "Show in Explorer" on Windows by app.js -->
+    <button id="lhide" class="btn wide subtle">Remove from DropCull</button>
+    <button id="lzoom" class="btn wide subtle">Zoom 100%</button>
+    <div class="lnav">
+      <button id="lprev" class="btn">← Prev</button>
+      <button id="lnext" class="btn">Next →</button>
+    </div>
+  </aside>
+  <button id="lclose" class="lclose" title="Close (Esc)">×</button>
+</div>
+
+<div id="dropOverlay" hidden><div>Drop to import</div></div>
+<div id="toasts"></div>
+
+<div id="modal" hidden>
+  <div class="modalcard">
+    <h3 id="modalTitle"></h3>
+    <p id="modalBody"></p>
+    <div class="modalbtns">
+      <button id="modalCancel" class="btn">Cancel</button>
+      <button id="modalOk" class="btn primary">Do it</button>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
